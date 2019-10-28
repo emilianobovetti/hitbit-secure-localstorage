@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="user-scalable=no, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, minimal-ui">
+  <title>secure-localstorage</title>
+  <link rel="stylesheet" href="//cdn.jsdelivr.net/npm/graphql-playground-react/build/static/css/index.css" />
+  <link rel="shortcut icon" href="//cdn.jsdelivr.net/npm/graphql-playground-react/build/favicon.png" />
+</head>
+
+<body>
+
+<div id="session-container-root"></div>
+
+<div id="root">
+  <style>
+    body {
+      background-color: rgb(23, 42, 58);
+      font-family: Open Sans, sans-serif;
+      height: 90vh;
+    }
+    #root {
+      height: 100%;
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .loading {
+      font-size: 32px;
+      font-weight: 200;
+      color: rgba(255, 255, 255, .6);
+      margin-left: 20px;
+    }
+    img {
+      width: 78px;
+      height: 78px;
+    }
+    .title {
+      font-weight: 400;
+    }
+  </style>
+
+  <img src='//cdn.jsdelivr.net/npm/graphql-playground-react/build/logo.png' alt=''>
+
+  <div class="loading"> Loading
+    <span class="title">GraphQL Playground</span>
+  </div>
+</div>
+
+<script>
+const root = document.getElementById('root');
+const origin = document.defaultView.location.origin;
+const herokuEndpoint = 'https://hitbit-app.herokuapp.com';
+const gqlEndpoint = origin === 'http://localhost' ? `${origin}:4000` : herokuEndpoint;
+
+const log = (...args) => {
+  args.unshift(`[${origin}]`);
+
+  console.log(...args);
+
+  return args[1];
+};
+
+const attempt = fn => {
+  let res;
+
+  try {
+    log(`(${fn.toString()}) produced`, res = fn());
+  } catch (err) {
+    log(`(${fn.toString()}) thrown`, res = err);
+  }
+
+  return res;
+};
+
+const sessionCtr = {
+  root: document.getElementById('session-container-root'),
+
+  origin: gqlEndpoint,
+
+  iframe: document.createElement('iframe'),
+
+  window: undefined,
+
+  queue: [],
+
+  flushQueue: _ =>
+    (sessionCtr.queue.forEach(sessionCtr.send), sessionCtr.queue = []),
+
+  send: data =>
+    sessionCtr.window.postMessage(data, sessionCtr.origin),
+
+  push: data =>
+    (sessionCtr.ready ? sessionCtr.send(data) : sessionCtr.queue.push(data)),
+
+  ready: false,
+
+  onReady: _ => {
+    sessionCtr.flushQueue();
+    sessionCtr.ready = true;
+
+    attempt(_ => sessionCtr.iframe.contentDocument);
+    attempt(_ => sessionCtr.window.localStorage);
+  },
+
+  onAuth: _ => {
+    sessionCtr.iframe.style = 'display: none';
+    sessionCtr.auth = true;
+  },
+
+  onDeauth: _ => {
+    sessionCtr.iframe.style = '';
+    sessionCtr.auth = false;
+  },
+
+  auth: false,
+};
+
+sessionCtr.iframe.src = `${gqlEndpoint}/session-container`;
+sessionCtr.iframe.width = 450;
+sessionCtr.iframe.height = 100;
+sessionCtr.root.appendChild(sessionCtr.iframe);
+
+sessionCtr.window = sessionCtr.iframe.contentWindow;
+
+const uniqid = (_ => {
+  let id = 0;
+
+  return _ => id++;
+})();
+
+const resolversMap = Object.create(null);
+
+window.fetch = (resource, init) => {
+  const reqId = uniqid(), callbacks = {};
+
+  // TODO
+  delete init.signal;
+
+  const promise = new Promise((res, rej) =>
+    (callbacks.resolve = res, callbacks.reject = rej)
+  );
+
+  resolversMap[reqId] = callbacks;
+
+  sessionCtr.push({
+    msg: 'fetch',
+    id: reqId,
+    resource,
+    init,
+  });
+
+  return promise;
+};
+
+const resolveFetchMessage = data => {
+  const { resolve, reject } = resolversMap[data.id];
+  delete resolversMap[data.id];
+
+  if (data.state !== 'ok') {
+    return reject();
+  }
+
+  const req = data.request;
+  const headers = req.responseHeaders;
+
+  const getHeader = name => {
+    name = name.toLowerCase();
+
+    return headers.filter(([ key, val ]) => key === name)[0];
+  };
+
+  const makeResponse = _ => ({
+    ok: req.status >= 200 && req.status <= 299,
+    url: req.responseURL,
+    status: req.status,
+    statusText: req.statusText,
+    text: () => Promise.resolve(req.responseText),
+    json: () => Promise.resolve(JSON.parse(req.responseText)),
+    blob: () => Promise.resolve(new Blob([ req.response ])),
+    clone: makeResponse,
+    headers: {
+      keys: () => headers.map(([ key, _val ]) => key),
+      entries: () => headers,
+      get: getHeader,
+      has: n => getHeader(n) != null,
+    },
+  });
+
+  resolve(makeResponse());
+};
+
+const onMessage = event => {
+  if (event.origin !== sessionCtr.origin) {
+    throw new Error(`Unknown origin: ${event.origin}`);
+  }
+
+  const { data } = event;
+
+  switch (data.msg) {
+    case 'ready':
+      sessionCtr.onReady(data);
+      break;
+
+    case 'fetch':
+      resolveFetchMessage(data);
+      break;
+
+    case 'auth':
+      if (data.state === 'ok') {
+        sessionCtr.onAuth(data);
+      } else {
+        sessionCtr.onDeauth(data);
+      }
+      break;
+
+    default:
+      console.log('Unknown message:', data.msg, 'with state:', data.state);
+      break;
+  }
+};
+
+window.addEventListener('message', onMessage, false);
+
+document.addEventListener('DOMContentLoaded', _ =>
+  GraphQLPlayground.init(root, { endpoint: gqlEndpoint })
+);
+</script>
+
+<script src="//cdn.jsdelivr.net/npm/graphql-playground-react/build/static/js/middleware.js"></script>
+
+</body>
+</html>
